@@ -39,12 +39,20 @@ PROVIDER_LABELS = {
 }
 
 
+def _short_text(value: str, limit: int = 180) -> str:
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 1].rstrip()}…"
+
+
 def _task_text(task, source_email=None, prefix: str | None = None) -> str:
     lines: list[str] = []
     if prefix:
         lines.extend([prefix, ""])
 
-    title = (task.title or "Без названия").strip()
+    raw_title = (task.title or "Без названия").strip()
+    title = _short_text(raw_title)
     lines.extend(
         [
             title,
@@ -69,8 +77,12 @@ def _task_text(task, source_email=None, prefix: str | None = None) -> str:
 
     lines.extend(details)
     description = (task.description or "").strip()
-    if description and description.casefold() != title.casefold():
-        lines.extend(["", "Описание", description])
+    description_heading = "Описание"
+    if description.casefold().startswith(raw_title.casefold()):
+        description = description[len(raw_title) :].lstrip(" \n:,-.;")
+        description_heading = "Дополнение"
+    if description and description.casefold() != raw_title.casefold():
+        lines.extend(["", description_heading, description])
 
     if source_email:
         received_at = (

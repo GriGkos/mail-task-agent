@@ -89,3 +89,25 @@ def test_task_menu_and_card_actions_are_user_facing():
         for row in _task_keyboard(task, "https://mail.example/source")
         for button in row
     ]
+
+
+def test_task_text_removes_repeated_title_from_description():
+    task = SimpleNamespace(
+        id="task-2",
+        title="Организовать встречу с клиентом",
+        status="inbox",
+        priority="medium",
+        description="Организовать встречу с клиентом. Желательно до пятницы.",
+        project=None,
+        due_at=None,
+        assignee=None,
+        waiting_for=None,
+        next_action=None,
+        requires_reply=False,
+    )
+
+    text = _task_text(task)
+
+    assert "Дополнение" in text
+    assert "Организовать встречу с клиентом. Желательно до пятницы." not in text
+    assert "Желательно до пятницы." in text
