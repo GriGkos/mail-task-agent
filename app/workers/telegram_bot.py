@@ -40,41 +40,53 @@ PROVIDER_LABELS = {
 
 
 def _task_text(task, source_email=None, prefix: str | None = None) -> str:
-    lines = []
+    lines: list[str] = []
     if prefix:
-        lines.append(prefix)
+        lines.extend([prefix, ""])
+
+    title = (task.title or "Без названия").strip()
     lines.extend(
         [
-            f"Задача: {task.title}",
+            title,
+            "",
             f"Статус: {STATUS_LABELS.get(task.status, task.status)}",
             f"Приоритет: {PRIORITY_LABELS.get(task.priority, task.priority)}",
-            f"Описание: {task.description or '-'}",
         ]
     )
-    lines.extend(
-        [
-            "Источник письма:",
-            f"От: {source_email.sender if source_email else '-'}",
-            f"Тема: {source_email.subject if source_email else '-'}",
-            (
-                f"Дата: {source_email.received_at:%d.%m.%Y %H:%M}"
-                if source_email and source_email.received_at
-                else "Дата: -"
-            ),
-        ]
-    )
+    details = []
     if task.project:
-        lines.append(f"Проект: {task.project}")
+        details.append(f"Проект: {task.project}")
     if task.due_at:
-        lines.append(f"Срок: {task.due_at:%d.%m.%Y %H:%M}")
+        details.append(f"Срок: {task.due_at:%d.%m.%Y %H:%M}")
     if task.assignee:
-        lines.append(f"Ответственный: {task.assignee}")
+        details.append(f"Ответственный: {task.assignee}")
     if task.waiting_for:
-        lines.append(f"Ожидаем от: {task.waiting_for}")
+        details.append(f"Ожидаем от: {task.waiting_for}")
     if task.next_action:
-        lines.append(f"Следующее действие: {task.next_action}")
+        details.append(f"Следующее действие: {task.next_action}")
     if task.requires_reply:
-        lines.append("Нужен ответ: да")
+        details.append("Нужен ответ: да")
+
+    lines.extend(details)
+    description = (task.description or "").strip()
+    if description and description.casefold() != title.casefold():
+        lines.extend(["", "Описание", description])
+
+    if source_email:
+        received_at = (
+            f"{source_email.received_at:%d.%m.%Y %H:%M}"
+            if source_email.received_at
+            else "Дата не указана"
+        )
+        lines.extend(
+            [
+                "",
+                "Письмо",
+                f"От: {source_email.sender or 'не указан'}",
+                f"Тема: {source_email.subject or 'Без темы'}",
+                f"Дата: {received_at}",
+            ]
+        )
     return "\n".join(lines)
 
 
