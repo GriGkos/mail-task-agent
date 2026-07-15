@@ -172,6 +172,7 @@ class Task(Base, TimestampMixin):
         String(255), ForeignKey("email_threads.gmail_thread_id"), index=True, nullable=True
     )
     source_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_permalink: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     requires_reply: Mapped[bool] = mapped_column(Boolean, default=False)
     last_activity_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

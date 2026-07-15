@@ -78,7 +78,12 @@ class TaskService:
 
         if decision.action == "create_task":
             return (
-                await self.tasks.create_from_decision(decision, gmail_thread_id, gmail_message_id),
+                await self.tasks.create_from_decision(
+                    decision,
+                    gmail_thread_id,
+                    gmail_message_id,
+                    email_payload.get("permalink"),
+                ),
                 None,
                 "task_created",
             )
@@ -86,8 +91,20 @@ class TaskService:
             task = matched or existing
             if task is None:
                 task = await self.tasks.create_from_decision(
-                    decision, gmail_thread_id, gmail_message_id
+                    decision,
+                    gmail_thread_id,
+                    gmail_message_id,
+                    email_payload.get("permalink"),
                 )
                 return task, None, "task_created"
-            return await self.tasks.update_from_decision(task, decision), None, "task_updated"
+            return (
+                await self.tasks.update_from_decision(
+                    task,
+                    decision,
+                    gmail_message_id,
+                    email_payload.get("permalink"),
+                ),
+                None,
+                "task_updated",
+            )
         return None, None, "ignored"

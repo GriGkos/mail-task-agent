@@ -10,7 +10,6 @@ import sqlalchemy as sa
 
 from alembic import op
 
-
 revision: str = "0005_universal_imap_accounts"
 down_revision: str | None = "0004_outlook_delta_cursor"
 branch_labels: str | Sequence[str] | None = None

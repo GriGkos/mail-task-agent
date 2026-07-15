@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
@@ -17,6 +17,7 @@ from app.api.schemas import (
 )
 from app.config import Settings, get_settings
 from app.db import get_session
+from app.db.models import MailAccount
 from app.db.repositories import (
     AgentRunRepository,
     ApprovalRepository,
@@ -24,10 +25,16 @@ from app.db.repositories import (
     UserRepository,
 )
 from app.integrations import TelegramClient, build_email_analyzer, build_mail_gateway
+from app.integrations.imap import IMAPClient
 from app.services.approval_service import ApprovalService
 from app.services.email_processing import EmailProcessingService
 from app.services.imap_setup_service import IMAPSetupService, imap_onboarding_html
 from app.services.oauth_service import OAuthService, onboarding_html
+from app.services.source_email_service import (
+    read_source_email_token,
+    source_email_html,
+)
+from app.services.token_service import TokenCipher
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -132,6 +139,61 @@ async def imap_onboarding_submit(
     return HTMLResponse(
         "<h1>Почта подключена</h1><p>Адрес: "
         f"{email}. Можно вернуться в Telegram.</p>"
+    )
+
+
+@router.get("/source-email/{token}", response_class=HTMLResponse)
+async def source_email(
+    token: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    try:
+        payload = read_source_email_token(settings, token)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="source email link not found") from exc
+
+    task = await TaskRepository(session, user_id=str(payload["user_id"])).get(
+        str(payload["task_id"])
+    )
+    if task is None or not task.source_message_id:
+        raise HTTPException(status_code=404, detail="source email not found")
+    if task.source_permalink:
+        return RedirectResponse(task.source_permalink)
+
+    source_parts = task.source_message_id.split(":", 2)
+    if len(source_parts) != 3 or source_parts[0] != "imap":
+        raise HTTPException(status_code=404, detail="source email link unavailable")
+
+    account = await session.scalar(
+        select(MailAccount)
+        .where(MailAccount.id == source_parts[1])
+        .where(MailAccount.user_id == str(payload["user_id"]))
+    )
+    if account is None or account.provider != "imap":
+        raise HTTPException(status_code=404, detail="mail account not found")
+
+    try:
+        token_payload = TokenCipher(settings).decrypt(account.encrypted_token)
+        mail = IMAPClient(settings, token_payload, account.id)
+        fetched = await mail.fetch_email(task.source_message_id)
+    except Exception as exc:
+        logger.exception("failed to load source email for task %s", task.id)
+        raise HTTPException(
+            status_code=502, detail="source email is temporarily unavailable"
+        ) from exc
+
+    body = fetched.body_text or ""
+    truncated = len(body) > settings.max_email_chars
+    return HTMLResponse(
+        source_email_html(
+            sender=fetched.sender,
+            recipients=fetched.recipients,
+            subject=fetched.subject,
+            received_at=fetched.received_at,
+            body=body[: settings.max_email_chars],
+            truncated=truncated,
+        )
     )
 
 

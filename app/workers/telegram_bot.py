@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from app.db.session import SessionLocal
 from app.integrations.telegram import TelegramClient, _TelegramTransport
 from app.services.approval_service import ApprovalService
 from app.services.oauth_service import OAuthService
+from app.services.source_email_service import create_source_email_token
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,7 @@ PROVIDER_LABELS = {
 }
 
 
-def _task_text(task, prefix: str | None = None) -> str:
+def _task_text(task, source_email=None, prefix: str | None = None) -> str:
     lines = []
     if prefix:
         lines.append(prefix)
@@ -47,6 +49,18 @@ def _task_text(task, prefix: str | None = None) -> str:
             f"Статус: {STATUS_LABELS.get(task.status, task.status)}",
             f"Приоритет: {PRIORITY_LABELS.get(task.priority, task.priority)}",
             f"Описание: {task.description or '-'}",
+        ]
+    )
+    lines.extend(
+        [
+            "Источник письма:",
+            f"От: {source_email.sender if source_email else '-'}",
+            f"Тема: {source_email.subject if source_email else '-'}",
+            (
+                f"Дата: {source_email.received_at:%d.%m.%Y %H:%M}"
+                if source_email and source_email.received_at
+                else "Дата: -"
+            ),
         ]
     )
     if task.project:
@@ -64,15 +78,31 @@ def _task_text(task, prefix: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _task_keyboard(task) -> list[list[dict[str, str]]]:
+def _task_keyboard(task, source_url: str | None = None) -> list[list[dict[str, str]]]:
     if task.status in {"done", "cancelled"}:
-        return [[{"text": "Вернуть в работу", "callback_data": f"task:reopen:{task.id}"}]]
-    return [
-        [
-            {"text": "Выполнено", "callback_data": f"task:done:{task.id}"},
-            {"text": "Отменить", "callback_data": f"task:cancel:{task.id}"},
+        keyboard = [
+            [{"text": "Вернуть в работу", "callback_data": f"task:reopen:{task.id}"}]
         ]
-    ]
+    else:
+        keyboard = [
+            [
+                {"text": "Выполнено", "callback_data": f"task:done:{task.id}"},
+                {"text": "Отменить", "callback_data": f"task:cancel:{task.id}"},
+            ]
+        ]
+    if source_url:
+        keyboard.append([{"text": "Открыть письмо", "url": source_url}])
+    return keyboard
+
+
+def _source_email_url(task, user_id: str) -> str | None:
+    if task.source_permalink:
+        return task.source_permalink
+    if not task.source_message_id or not task.source_message_id.startswith("imap:"):
+        return None
+    token = create_source_email_token(get_settings(), task.id, user_id)
+    base_url = get_settings().app_base_url.rstrip("/")
+    return f"{base_url}/source-email/{quote(token, safe='')}"
 
 
 def _menu() -> list[list[dict[str, str]]]:
@@ -201,23 +231,33 @@ async def _connect_imap(session, identity, client: TelegramClient) -> None:
 
 
 async def _send_tasks(session, identity, client: TelegramClient) -> None:
-    tasks = await TaskRepository(session, user_id=identity.user_id).list_open(limit=20)
+    repository = TaskRepository(session, user_id=identity.user_id)
+    tasks = await repository.list_open(limit=20)
     if not tasks:
         await client.send_message("Активных задач пока нет.")
         return
     await client.send_message(f"Активные задачи: {len(tasks)}")
     for task in tasks:
-        await client.send_menu(_task_text(task), _task_keyboard(task))
+        source_email = await repository.source_email(task)
+        await client.send_menu(
+            _task_text(task, source_email),
+            _task_keyboard(task, _source_email_url(task, identity.user_id)),
+        )
 
 
 async def _send_completed_tasks(session, identity, client: TelegramClient) -> None:
-    tasks = await TaskRepository(session, user_id=identity.user_id).list_completed(limit=20)
+    repository = TaskRepository(session, user_id=identity.user_id)
+    tasks = await repository.list_completed(limit=20)
     if not tasks:
         await client.send_message("Выполненных задач пока нет.")
         return
     await client.send_message(f"Выполненные задачи: {len(tasks)}")
     for task in tasks:
-        await client.send_menu(_task_text(task), _task_keyboard(task))
+        source_email = await repository.source_email(task)
+        await client.send_menu(
+            _task_text(task, source_email),
+            _task_keyboard(task, _source_email_url(task, identity.user_id)),
+        )
 
 
 async def _send_pending(session, identity, client: TelegramClient) -> None:
@@ -423,10 +463,18 @@ async def _handle_task_action(
         await client.send_message("Задача не найдена или больше вам не принадлежит.")
         return
     await session.commit()
+    source_email = await repository.source_email(task)
     if message_id is not None:
-        await client.edit_message(message_id, _task_text(task, result), _task_keyboard(task))
+        await client.edit_message(
+            message_id,
+            _task_text(task, source_email, result),
+            _task_keyboard(task, _source_email_url(task, identity.user_id)),
+        )
     else:
-        await client.send_menu(_task_text(task, result), _task_keyboard(task))
+        await client.send_menu(
+            _task_text(task, source_email, result),
+            _task_keyboard(task, _source_email_url(task, identity.user_id)),
+        )
 
 
 async def _handle_approval(

@@ -60,6 +60,7 @@ class ApprovalService:
         decision = EmailDecision.model_validate(payload["decision"])
         thread_id = payload["gmail_thread_id"]
         message_id = payload["gmail_message_id"]
+        email_payload = payload.get("email") or {}
         existing = await self.tasks.by_thread(thread_id)
         matched = (
             await self.tasks.get(str(decision.matched_task_id))
@@ -68,7 +69,17 @@ class ApprovalService:
         )
         task = matched or existing
         if decision.action in {"create_task", "update_task"} and task is None:
-            return await self.tasks.create_from_decision(decision, thread_id, message_id)
+            return await self.tasks.create_from_decision(
+                decision,
+                thread_id,
+                message_id,
+                email_payload.get("permalink"),
+            )
         if task:
-            return await self.tasks.update_from_decision(task, decision)
+            return await self.tasks.update_from_decision(
+                task,
+                decision,
+                message_id,
+                email_payload.get("permalink"),
+            )
         return None

@@ -144,6 +144,16 @@ class TaskRepository:
             stmt = stmt.where(Task.user_id == self.user_id)
         return list(await self.session.scalars(stmt))
 
+    async def source_email(self, task: Task) -> EmailMessage | None:
+        if not task.source_message_id:
+            return None
+        stmt = select(EmailMessage).where(
+            EmailMessage.gmail_message_id == task.source_message_id
+        )
+        if self.user_id is not None:
+            stmt = stmt.where(EmailMessage.user_id == self.user_id)
+        return await self.session.scalar(stmt)
+
     async def set_status(self, task_id: str, status: str, reason: str) -> Task:
         allowed_statuses = {
             "inbox",
@@ -179,7 +189,11 @@ class TaskRepository:
         return task
 
     async def create_from_decision(
-        self, decision: EmailDecision, gmail_thread_id: str, source_message_id: str
+        self,
+        decision: EmailDecision,
+        gmail_thread_id: str,
+        source_message_id: str,
+        source_permalink: str | None = None,
     ) -> Task:
         now = datetime.now(UTC)
         task = Task(
@@ -195,6 +209,7 @@ class TaskRepository:
             next_action=decision.next_action,
             gmail_thread_id=gmail_thread_id,
             source_message_id=source_message_id,
+            source_permalink=source_permalink,
             requires_reply=decision.requires_reply,
             last_activity_at=now,
             completed_at=now if decision.status == "done" else None,
@@ -204,7 +219,13 @@ class TaskRepository:
         await self.add_event(task, {}, task_snapshot(task), decision.reason, decision.confidence)
         return task
 
-    async def update_from_decision(self, task: Task, decision: EmailDecision) -> Task:
+    async def update_from_decision(
+        self,
+        task: Task,
+        decision: EmailDecision,
+        source_message_id: str | None = None,
+        source_permalink: str | None = None,
+    ) -> Task:
         old = task_snapshot(task)
         now = datetime.now(UTC)
         updates = {
@@ -224,6 +245,9 @@ class TaskRepository:
             if value is not None:
                 setattr(task, field, value)
         task.completed_at = now if task.status == "done" else None
+        if source_message_id:
+            task.source_message_id = source_message_id
+            task.source_permalink = source_permalink
         await self.add_event(task, old, task_snapshot(task), decision.reason, decision.confidence)
         return task
 
@@ -376,6 +400,8 @@ def task_snapshot(task: Task) -> dict[str, Any]:
         "assignee": task.assignee,
         "waiting_for": task.waiting_for,
         "next_action": task.next_action,
+        "source_message_id": task.source_message_id,
+        "source_permalink": task.source_permalink,
         "requires_reply": task.requires_reply,
     }
 

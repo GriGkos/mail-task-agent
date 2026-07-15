@@ -72,3 +72,15 @@ def test_task_menu_and_card_actions_are_user_facing():
     labels = [button["text"] for row in keyboard for button in row]
     assert labels == ["Выполнено", "Отменить"]
     assert "Обсудить сроки поставки." in _task_text(task)
+
+    source = SimpleNamespace(
+        sender="supplier@example.com",
+        subject="Delivery date",
+        received_at=None,
+    )
+    assert "supplier@example.com" in _task_text(task, source)
+    assert "Открыть письмо" in [
+        button["text"]
+        for row in _task_keyboard(task, "https://mail.example/source")
+        for button in row
+    ]

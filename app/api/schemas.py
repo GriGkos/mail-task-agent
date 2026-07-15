@@ -19,6 +19,7 @@ class TaskOut(BaseModel):
     next_action: str | None
     gmail_thread_id: str | None
     source_message_id: str | None
+    source_permalink: str | None
     requires_reply: bool
     last_activity_at: datetime | None
     created_at: datetime

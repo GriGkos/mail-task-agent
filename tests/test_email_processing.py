@@ -30,12 +30,14 @@ async def process(session, settings, email, model_decision):
 
 @pytest.mark.asyncio
 async def test_creates_new_task_from_explicit_request(session, settings):
-    result = await process(session, settings, fetched_email(), decision())
+    email = fetched_email()
+    result = await process(session, settings, email, decision())
     tasks = list(await session.scalars(select(Task)))
 
     assert result.status == "task_created"
     assert len(tasks) == 1
     assert tasks[0].title == "Prepare quarterly report"
+    assert tasks[0].source_permalink == email.permalink
     assert tasks[0].requires_reply is True
 
 
@@ -56,10 +58,15 @@ async def test_ignores_newsletter(session, settings):
 async def test_updates_existing_task_by_thread_id(session, settings):
     email = fetched_email()
     await process(session, settings, email, decision())
+    update_email = fetched_email(
+        gmail_message_id="msg-2",
+        body_text="Update: please wait for Anna.",
+        permalink="https://mail.google.com/mail/u/0/#inbox/msg-2",
+    )
     result = await process(
         session,
         settings,
-        fetched_email(gmail_message_id="msg-2", body_text="Update: please wait for Anna."),
+        update_email,
         decision(
             action="update_task",
             status="waiting",
@@ -74,6 +81,8 @@ async def test_updates_existing_task_by_thread_id(session, settings):
     assert len(tasks) == 1
     assert tasks[0].status == "waiting"
     assert tasks[0].waiting_for == "Anna"
+    assert tasks[0].source_message_id == "msg-2"
+    assert tasks[0].source_permalink == update_email.permalink
 
 
 @pytest.mark.asyncio
