@@ -142,6 +142,8 @@ class EmailProcessingService:
             approval.telegram_message_id = await self.telegram.send_approval(
                 approval.id, self._approval_text(fetched, decision), fetched.permalink
             )
+        elif task and status in {"task_created", "task_updated"}:
+            await self.telegram.send_message(self._task_notice(fetched, task, status))
         if not self.settings.dry_run:
             labels = [gmail_label_for_decision(decision), "AI/Processed"]
             await self.gmail.apply_labels(fetched.gmail_message_id, labels)
@@ -174,4 +176,24 @@ class EmailProcessingService:
             f"Задача: {task_title}\n"
             f"Уверенность: {decision.confidence:.2f}\n"
             f"Причина: {decision.reason}"
+        )
+
+    def _task_notice(self, email: FetchedEmail, task, status: str) -> str:
+        heading = "Новая задача добавлена" if status == "task_created" else "Задача обновлена"
+        source_lines = [
+            f"От: {email.sender}",
+            f"Тема: {email.subject or 'Без темы'}",
+        ]
+        if email.permalink:
+            source_lines.append(f"Письмо: {email.permalink}")
+        return "\n".join(
+            [
+                heading,
+                "",
+                task.title,
+                "Источник",
+                *source_lines,
+                "",
+                "Откройте /tasks, чтобы посмотреть задачу и выполнить действие.",
+            ]
         )

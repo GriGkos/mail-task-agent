@@ -42,6 +42,26 @@ async def test_creates_new_task_from_explicit_request(session, settings):
 
 
 @pytest.mark.asyncio
+async def test_automatic_task_creation_sends_telegram_notice(session, settings):
+    email = fetched_email()
+    telegram = FakeTelegram()
+    service = EmailProcessingService(
+        settings,
+        session,
+        FakeGmail(email),
+        FakeAnalyzer(decision()),
+        telegram,
+    )
+
+    result = await service.process_gmail_message(email.gmail_message_id)
+
+    assert result.status == "task_created"
+    assert len(telegram.messages) == 1
+    assert "Новая задача добавлена" in telegram.messages[0]
+    assert email.subject in telegram.messages[0]
+
+
+@pytest.mark.asyncio
 async def test_ignores_newsletter(session, settings):
     result = await process(
         session,
