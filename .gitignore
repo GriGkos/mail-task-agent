@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.db
+*.egg-info/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+htmlcov/
+.coverage
