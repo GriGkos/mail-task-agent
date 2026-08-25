@@ -1,125 +1,232 @@
-# mail-task-agent
+# Mail Task Agent
 
-MVP ИИ-агента для обработки Gmail-почты, создания и обновления задач, ведения журнала решений и запроса подтверждений через Telegram. Проект построен на FastAPI, LangGraph, SQLAlchemy 2, Alembic, PostgreSQL, DeepSeek direct или OpenModel gateway, Gmail API и Telegram Bot API.
+AI backend that turns incoming email into structured tasks, asks for human confirmation when a decision is ambiguous, and keeps an audit trail of every agent run.
 
-По умолчанию агент запускается в безопасном режиме:
+The project is built around a simple product idea: **an LLM may interpret email, but potentially unsafe or uncertain actions should remain observable and controllable by the user**.
 
-- читает только письма по запросу `label:AI_TEST -label:AI/Processed` для Gmail
-  или с категорией `AI_TEST` для Outlook;
-- не меняет Gmail при `DRY_RUN=true`;
-- не создаёт реальные задачи при `DRY_RUN=true`;
-- никогда не удаляет, не архивирует и не отправляет письма автоматически.
+`FastAPI` · `LangGraph` · `PostgreSQL` · `SQLAlchemy 2` · `Alembic` · `Gmail API` · `Microsoft Graph` · `Telegram Bot API` · `Docker`
 
-## Product Mode
+## What it does
 
-Проект теперь поддерживает два режима:
+The agent can:
 
-- single-user режим через `.env`, удобный для локальной проверки;
-- multi-user foundation: пользователь приходит из Telegram или web onboarding,
-  подключает Gmail/Outlook через OAuth, а LLM вызывается только backend-сервисом
-  через ваш API key.
+- read selected Gmail or Outlook messages;
+- sanitize and redact email content before model processing;
+- classify an email and decide whether it creates, updates, or refers to a task;
+- validate the LLM response with Pydantic schemas;
+- create or update persistent tasks in PostgreSQL;
+- request confirmation through Telegram for low-confidence or ambiguous decisions;
+- keep `AgentRun`, task-event, email and approval history;
+- send task digests through a separate worker;
+- support both a simple single-user setup and a multi-user onboarding flow with OAuth-connected mail accounts.
 
-Рекомендуемый продуктовый сценарий:
+The current MVP intentionally does **not** automatically send replies, archive mail, or delete messages.
 
-1. Telegram bot вызывает `POST /telegram/link-token` для пользователя.
-2. Backend возвращает onboarding URL.
-3. Пользователь открывает web onboarding.
-4. Пользователь подключает Gmail или Outlook через OAuth.
-5. Refresh/token cache шифруется и хранится в `mail_accounts`.
-6. Worker обходит активные `mail_accounts` и обрабатывает почту каждого
-   пользователя отдельно.
-
-## Архитектура
+## Processing flow
 
 ```mermaid
 flowchart TD
-    Mail[Gmail label or Outlook category] --> Worker[gmail-worker]
+    Mail[Gmail label / Outlook category] --> Worker[Mail worker]
     Worker --> Redact[Sanitize and redact]
-    Redact --> LLM[LLM provider decision]
+    Redact --> LLM[LLM decision]
     LLM --> Validate[Pydantic validation]
-    Validate --> Route{Auto or review?}
-    Route -->|high confidence safe action| Tasks[(PostgreSQL tasks)]
-    Route -->|ambiguous or done| Approval[(ApprovalRequest)]
-    Approval --> Telegram[Telegram inline buttons]
-    Telegram --> API[Approval API / bot worker]
+    Validate --> Route{Safe to apply?}
+    Route -->|yes| Tasks[(PostgreSQL tasks)]
+    Route -->|needs review| Approval[(Approval request)]
+    Approval --> Telegram[Telegram inline actions]
+    Telegram --> API[FastAPI approval API]
     API --> Tasks
-    Tasks --> Digest[digest-worker]
+    Tasks --> Digest[Digest worker]
     Digest --> Telegram
-    API --> Runs[(AgentRun log)]
+    API --> Runs[(Agent run log)]
     Worker --> Runs
 ```
 
-Основные слои:
+## Engineering decisions
 
-- `app/integrations`: Gmail, Outlook/Microsoft Graph, DeepSeek direct, OpenModel,
-  Telegram clients.
-- `app/services`: обработка писем, задачи, approvals, дайджест, редактирование текста.
-- `app/agent`: Pydantic-схемы решения, prompt, routing, LangGraph skeleton.
-- `app/db`: SQLAlchemy-модели и репозитории.
-- `app/api`: FastAPI endpoints.
-- `app/workers`: Gmail polling, Telegram callback polling, daily digest.
+### Human in the loop
 
-## Структура
+The model does not get unrestricted access to mailbox actions. Review is required for:
+
+- low-confidence decisions;
+- explicit `request_review` decisions;
+- proposed task completion;
+- ambiguous task updates;
+- future potentially destructive actions.
+
+Telegram approvals are handled through explicit actions such as **Approve**, **Edit**, **Reject** and **Open email**.
+
+### Safe-by-default execution
+
+The default configuration is intentionally restrictive:
+
+```env
+SAFE_MODE=true
+DRY_RUN=true
+GMAIL_QUERY=label:AI_TEST -label:AI/Processed
+```
+
+With `DRY_RUN=true`, the system can read selected mail, call the configured LLM provider and write an `AgentRun`, but it does not apply Gmail labels, create real tasks or send real approval messages.
+
+### Idempotency and recovery
+
+- repeated processing of the same Gmail message does not create duplicate work;
+- approval callbacks are idempotent;
+- processing errors are persisted in `agent_runs.error`;
+- in working mode, final processing errors can be marked with an error label/category;
+- task changes are recorded as task events rather than being silently overwritten.
+
+### Privacy-oriented storage
+
+The full email body is not stored by default. `email_messages` keeps metadata together with a `body_hash`.
+
+OAuth credentials for connected mail accounts are stored encrypted in `mail_accounts.encrypted_token`; encryption is configured with `TOKEN_ENCRYPTION_KEY`.
+
+## Product modes
+
+### Single-user mode
+
+Useful for local development and personal testing. Credentials and the selected provider are configured through `.env`.
+
+### Multi-user foundation
+
+The repository also contains the base flow for a product-style setup:
+
+1. a Telegram user receives an onboarding link;
+2. the user opens the web onboarding page;
+3. Gmail or Outlook is connected through OAuth;
+4. the encrypted token/cache is stored for that user;
+5. workers process active mail accounts independently;
+6. LLM calls are performed only by the backend using the service API key.
+
+This is a foundation rather than a finished SaaS product: billing, durable LangGraph resume and several production hardening steps are intentionally outside the current MVP.
+
+## Stack
+
+**Backend and workflow**
+
+- Python 3.12+
+- FastAPI
+- Pydantic / pydantic-settings
+- LangGraph workflow layer
+
+**Persistence**
+
+- PostgreSQL
+- SQLAlchemy 2 async
+- Alembic
+- asyncpg / psycopg
+
+**Integrations**
+
+- Gmail API + Google OAuth
+- Outlook / Microsoft Graph + MSAL
+- Telegram Bot API
+- DeepSeek through an OpenAI-compatible client
+- OpenModel through an Anthropic-compatible client
+
+**Engineering**
+
+- Docker / Docker Compose
+- pytest / pytest-asyncio
+- Ruff
+- Caddy configuration and deployment notes
+
+## Repository structure
 
 ```text
 app/
-  api/
-  agent/
-  db/
-  integrations/
-  services/
-  workers/
-alembic/
-tests/
+  api/            FastAPI endpoints
+  agent/          decision schemas, prompts and routing
+  db/             models and repositories
+  integrations/   Gmail, Outlook, LLM and Telegram clients
+  services/       email processing, tasks, approvals and digest logic
+  workers/        mail polling, Telegram callbacks and digest workers
+alembic/           database migrations
+tests/             integration/service tests
 Dockerfile
 docker-compose.yml
+DEPLOY.md
 pyproject.toml
 .env.example
-Makefile
 ```
 
-## Настройка
+## Data model
 
-1. Установите Python 3.12+.
-2. Создайте `.env`:
+Alembic migrations create the main entities:
+
+- `users`
+- `telegram_identities`
+- `mail_accounts`
+- `user_settings`
+- `oauth_states`
+- `email_threads`
+- `email_messages`
+- `tasks`
+- `task_events`
+- `approval_requests`
+- `agent_runs`
+
+The separation between source email, agent decision, approval and task state makes the workflow auditable and easier to recover after failures.
+
+## Quick start
+
+### 1. Install
 
 ```bash
+python -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-3. Заполните секреты:
+Fill the required credentials in `.env`.
 
-- `DEEPSEEK_API_KEY`: ключ DeepSeek direct provider.
-- `OPENMODEL_API_KEY`: ключ OpenModel, если используете `LLM_PROVIDER=openmodel`.
-- `MICROSOFT_CLIENT_ID`: application client id, если используете
-  `MAIL_PROVIDER=outlook`.
-- `TELEGRAM_BOT_TOKEN`: токен бота от BotFather.
-- `TELEGRAM_ALLOWED_USER_ID`: ваш Telegram user id.
-- `ADMIN_API_KEY`: ключ для административных API.
-- `GOOGLE_CLIENT_SECRET_FILE`: путь к OAuth client secret JSON.
-- `GOOGLE_TOKEN_FILE`: путь для сохранённого Gmail OAuth token.
+### 2. Prepare the database
 
-## Gmail OAuth
+```bash
+alembic upgrade head
+```
 
-1. В Google Cloud Console создайте проект.
-2. Включите Gmail API.
-3. Настройте OAuth consent screen и добавьте свой аккаунт в Test users.
-4. Создайте OAuth Client ID типа Web application.
-5. Добавьте Authorized redirect URI: `http://localhost:8000/oauth/gmail/callback`.
-6. Скачайте client secret JSON в `secrets/google_client_secret.json`.
-7. Создайте ссылку через `POST /onboarding/new`, откройте её и выберите Gmail.
+### 3. Start the API
 
-Для production добавьте HTTPS callback вида
-`https://<ваш-домен>/oauth/gmail/callback` и замените `APP_BASE_URL`.
+```bash
+uvicorn app.main:app --reload
+```
 
-В single-user режиме без web onboarding можно использовать Desktop OAuth client:
-при первом запуске `gmail-worker` откроет локальный OAuth flow и сохранит token в `GOOGLE_TOKEN_FILE`.
+Or start the base Docker Compose stack:
 
-Нужный scope: `https://www.googleapis.com/auth/gmail.modify`. Агент использует его для чтения и добавления AI-ярлыков, но не удаляет письма и не отправляет ответы.
+```bash
+docker compose up --build
+```
 
-## Outlook / Microsoft Graph
+The default Compose setup starts PostgreSQL, a one-shot migration service and the API. Mail, Telegram and digest workers are kept in a separate `workers` profile so onboarding can be started before mail accounts are connected.
 
-Outlook включается через Microsoft Graph Mail API:
+```bash
+docker compose --profile workers up --build
+```
+
+## Mail providers
+
+### Gmail
+
+For web onboarding, create a Google OAuth client and configure:
+
+```text
+http://localhost:8000/oauth/gmail/callback
+```
+
+The required Gmail scope is:
+
+```text
+https://www.googleapis.com/auth/gmail.modify
+```
+
+The agent uses it for reading messages and managing its own AI labels. Sending, deleting and archiving are not part of the MVP.
+
+For a safe first run, create an `AI_TEST` label and mark only a test message with it.
+
+### Outlook / Microsoft Graph
+
+Outlook uses Microsoft Graph categories instead of Gmail labels. Example configuration:
 
 ```env
 MAIL_PROVIDER=outlook
@@ -131,209 +238,37 @@ OUTLOOK_CATEGORY=AI_TEST
 OUTLOOK_PROCESSED_CATEGORY=AI_Processed
 ```
 
-Для получения `MICROSOFT_CLIENT_ID`:
+The implementation supports categories such as `AI_TEST`, `AI_Task`, `AI_Waiting`, `AI_Review`, `AI_Info`, `AI_Processed` and `AI_Error`.
 
-1. Откройте Microsoft Entra admin center.
-2. Перейдите в App registrations -> New registration.
-3. Для личной Outlook/Hotmail почты выберите аккаунты Microsoft personal accounts
-   или multi-tenant + personal accounts.
-4. Скопируйте Application (client) ID.
-5. В API permissions добавьте delegated permissions:
-   `User.Read`, `Mail.ReadWrite`, `offline_access`.
+## LLM providers
 
-При первом запуске worker создаст device-code flow и выведет в лог ссылку и код.
-После входа токен сохранится в `MICROSOFT_TOKEN_CACHE_FILE`.
-
-Outlook не использует Gmail labels. Вместо них агент создаёт и применяет
-категории:
-
-- `AI_TEST`
-- `AI_Task`
-- `AI_Waiting`
-- `AI_Review`
-- `AI_Info`
-- `AI_Processed`
-- `AI_Error`
-
-## Telegram
-
-1. Создайте бота через BotFather.
-2. Укажите `TELEGRAM_BOT_TOKEN`.
-3. Узнайте свой numeric user id и укажите `TELEGRAM_ALLOWED_USER_ID`.
-
-Без `TELEGRAM_ALLOWED_USER_ID` Telegram worker остаётся неактивным.
-
-Бот принимает callbacks только от разрешённого пользователя. Кнопки approval: `Подтвердить`, `Изменить`, `Отклонить`, `Открыть письмо`.
-
-## LLM provider
-
-Провайдер выбирается через:
+Provider selection is configured through:
 
 ```env
 LLM_PROVIDER=deepseek
 ```
 
-Поддерживаются:
+Supported implementations:
 
-- `deepseek`: прямой DeepSeek OpenAI-compatible Chat Completions client через пакет `openai`.
-- `openmodel`: OpenModel gateway через Anthropic-compatible Messages API и пакет `anthropic`.
+- `deepseek` — OpenAI-compatible chat-completions client;
+- `openmodel` — Anthropic-compatible messages client.
 
-### DeepSeek direct
+The model response must pass Pydantic JSON validation. If the response is invalid, one retry is performed instead of silently accepting malformed output.
 
-DeepSeek вызывается официальным пакетом `openai`:
+## Telegram approvals
 
-```env
-LLM_PROVIDER=deepseek
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
-```
-
-### OpenModel gateway
-
-OpenModel вызывается отдельным анализатором `OpenModelAnalyzer` через `AsyncAnthropic.messages.create`.
+Configure:
 
 ```env
-LLM_PROVIDER=openmodel
-OPENMODEL_API_KEY=om-...
-OPENMODEL_BASE_URL=https://api.openmodel.ai
-OPENMODEL_MODEL=deepseek-v4-flash
-OPENMODEL_MAX_TOKENS=2048
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_ALLOWED_USER_ID=
 ```
 
-Имя модели полностью задаётся через env. Ответ LLM валидируется как JSON через Pydantic; при невалидном JSON выполняется одна повторная попытка.
+Without `TELEGRAM_ALLOWED_USER_ID`, the single-user Telegram worker stays inactive. Approval callbacks are accepted only for the configured user in this mode.
 
-## Запуск
+The multi-user flow links Telegram identity and mailbox onboarding through a backend-generated token.
 
-Локально:
-
-```bash
-python -m pip install -e ".[dev]"
-alembic upgrade head
-uvicorn app.main:app --reload
-```
-
-Через Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-По умолчанию Compose запускает `postgres`, одноразовый `migrate` и `api`.
-Почтовый worker, Telegram bot и digest worker вынесены в профиль `workers`,
-чтобы onboarding/API можно было поднять до подключения почтовых аккаунтов.
-
-Запустить воркеры:
-
-```bash
-docker compose --profile workers up --build
-```
-
-Остановить:
-
-```bash
-docker compose down
-```
-
-API:
-
-- `GET /health`
-- `GET /ready`
-- `GET /tasks`
-- `GET /tasks/{task_id}`
-- `GET /runs`
-- `GET /approvals`
-- `POST /emails/{gmail_message_id}/process`
-- `POST /approvals/{approval_id}/approve`
-- `POST /approvals/{approval_id}/reject`
-- `POST /approvals/{approval_id}/edit`
-
-Для административных endpoints передавайте:
-
-```bash
-X-API-Key: <ADMIN_API_KEY>
-```
-
-## Первый безопасный прогон
-
-1. Оставьте:
-
-```env
-SAFE_MODE=true
-DRY_RUN=true
-GMAIL_QUERY=label:AI_TEST -label:AI/Processed
-```
-
-2. Для Gmail создайте ярлык `AI_TEST` и пометьте одно тестовое письмо.
-3. Для Outlook поставьте письму категорию `AI_TEST`.
-4. Запустите:
-
-```bash
-docker compose up --build
-```
-
-При `DRY_RUN=true` агент может читать Gmail, вызывать выбранный LLM provider и писать `AgentRun`, но не добавляет Gmail-ярлыки, не создаёт реальные задачи и не отправляет реальные approval-сообщения.
-
-Чтобы включить рабочий режим, установите:
-
-```env
-DRY_RUN=false
-```
-
-Оставьте `SAFE_MODE=true`, пока не убедитесь, что `GMAIL_QUERY` ограничен тестовым ярлыком.
-
-## Тесты и качество
-
-Тесты не используют реальные Gmail, DeepSeek/OpenModel или Telegram:
-
-```bash
-pytest
-ruff check .
-ruff format --check .
-```
-
-В этом репозитории проверки были запущены через Python 3.13, потому что локальный `python` был 3.10, а Python 3.12 не установлен.
-
-## Модель данных
-
-Alembic migration создаёт:
-
-- `email_threads`
-- `email_messages`
-- `tasks`
-- `task_events`
-- `approval_requests`
-- `agent_runs`
-- `users`
-- `telegram_identities`
-- `mail_accounts`
-- `user_settings`
-- `oauth_states`
-
-Полный текст письма по умолчанию не хранится. В `email_messages` сохраняются metadata и `body_hash`.
-
-OAuth-токены почты хранятся в `mail_accounts.encrypted_token`. Для шифрования
-обязательно задайте:
-
-```env
-TOKEN_ENCRYPTION_KEY=
-```
-
-Сгенерировать ключ:
-
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-## Web Onboarding
-
-Создать временную web-ссылку без Telegram:
-
-```bash
-curl -X POST http://localhost:8000/onboarding/new
-```
-
-Создать ссылку для пользователя Telegram, этот endpoint должен вызывать ваш bot
-backend:
+Example:
 
 ```bash
 curl -X POST http://localhost:8000/telegram/link-token \
@@ -342,49 +277,55 @@ curl -X POST http://localhost:8000/telegram/link-token \
   -d '{"telegram_user_id":"123","chat_id":"123","username":"alice"}'
 ```
 
-Ответ содержит:
+## API examples
 
-```json
-{
-  "link_token": "...",
-  "onboarding_url": "http://localhost:8000/onboarding/..."
-}
-```
-
-Пользователь открывает `onboarding_url` и выбирает Gmail или Outlook.
-
-Для OAuth callback в Google/Microsoft укажите:
+Main endpoints include:
 
 ```text
-http://localhost:8000/oauth/gmail/callback
-http://localhost:8000/oauth/outlook/callback
+GET  /health
+GET  /ready
+GET  /tasks
+GET  /tasks/{task_id}
+GET  /runs
+GET  /approvals
+POST /emails/{gmail_message_id}/process
+POST /approvals/{approval_id}/approve
+POST /approvals/{approval_id}/reject
+POST /approvals/{approval_id}/edit
 ```
 
-В продакшене замените `APP_BASE_URL` на публичный HTTPS-домен.
+Administrative endpoints use:
 
-## Что требует подтверждения
+```text
+X-API-Key: <ADMIN_API_KEY>
+```
 
-Подтверждение требуется для:
+A temporary onboarding URL can also be created directly:
 
-- низкой уверенности модели;
-- `request_review`;
-- любого предложения перевести задачу в `done`;
-- неоднозначных обновлений задачи;
-- будущих опасных действий вроде отправки письма, архивации или удаления.
+```bash
+curl -X POST http://localhost:8000/onboarding/new
+```
 
-Удаление, архивирование и автоматическая отправка ответов в MVP не реализованы намеренно.
+## Tests and code quality
 
-## Восстановление после ошибок
+The test suite uses mocked/local dependencies rather than real Gmail, LLM or Telegram calls. It covers areas including email processing, Gmail history handling, Outlook, IMAP, onboarding, routing, task persistence and Telegram integration.
 
-- Ошибки обработки сохраняются в `agent_runs.error`.
-- В рабочем режиме при финальной ошибке агент пытается добавить Gmail-ярлык `AI/Error`.
-- Повторная обработка уже обработанного `gmail_message_id` не создаёт дубликаты.
-- Approval callback идемпотентен: повторное нажатие не применяет действие дважды.
+```bash
+pytest
+ruff check .
+ruff format --check .
+```
 
-## Ограничения MVP
+## Deployment
 
-- Gmail push notifications не подключены; используется polling, но бизнес-логика отделена от polling worker.
-- Вложения не передаются в LLM.
-- Telegram `Изменить` в polling worker оставляет approval на ручное редактирование через API `POST /approvals/{id}/edit`.
-- LangGraph подключён как workflow layer/skeleton; durable resume можно расширить поверх `ApprovalRequest.langgraph_thread_id`.
-- Автоматические ответы на письма, удаление и архивация отключены.
+A more detailed deployment checklist is available in [`DEPLOY.md`](DEPLOY.md). The repository includes Docker, Compose and Caddy configuration for running the service behind a public HTTPS endpoint.
+
+## Current MVP limitations
+
+- Gmail uses polling rather than push notifications;
+- attachments are not passed to the LLM;
+- Telegram **Edit** leaves the approval for explicit editing through the API;
+- LangGraph is currently used as the workflow/orchestration layer rather than a fully durable resume engine;
+- automatic email replies, deletion and archiving are intentionally disabled.
+
+These constraints are deliberate: the current version focuses on **reliable interpretation, persistent state, explicit approvals and recoverable backend behavior** before expanding the set of autonomous actions.
